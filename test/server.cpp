@@ -67,6 +67,8 @@ int main(int argc, char *argv[]) {
 
   std::string file_name =
       std::string(SERVER_FILE_PATH) + std::string(message_recv);
+  free(message_recv);
+  
   if (udp_server->OpenFile(file_name)) {
     udp_server->StartFileTransfer();
   } else {

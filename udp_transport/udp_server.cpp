@@ -307,6 +307,10 @@ void UdpServer::wait_for_ack() {
   };
   DataSegment ack_segment;
   ack_segment.DeserializeToDataSegment(buffer, n);
+  if(ack_segment.data_ != nullptr){
+    free(ack_segment.data_);
+    ack_segment.data_ = nullptr;
+  }
 
   // LOG(INFO) << "ACK Received: ack_number " << ack_segment->ack_number_;
   SlidWinBuffer last_packet_acked_buffer =
@@ -417,6 +421,7 @@ void UdpServer::read_file_and_send(bool fin_flag, int start_byte,
   char *fileData = reinterpret_cast<char *>(calloc(datalength, sizeof(char)));
   if (!file_.is_open()) {
     LOG(ERROR) << "File open failed !!!";
+    free(fileData);
     return;
   }
   file_.seekg(start_byte);
