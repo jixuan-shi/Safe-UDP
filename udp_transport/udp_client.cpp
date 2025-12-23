@@ -16,6 +16,65 @@ UdpClient::UdpClient() {
   last_in_order_packet_ = -1;
   last_packet_received_ = -1;
   fin_flag_received_ = false;
+
+  // 初始化多线程变量
+  stop_worker_ = false;
+  last_written_packet_ = -1;
+}
+
+void UdpClient::file_write_loop(const std::string &filename) {
+  std::fstream file;
+  std::string file_path = std::string(CLIENT_FILE_PATH) + filename;
+  file.open(file_path.c_str(), std::ios::out);
+
+  if (!file.is_open()) {
+    LOG(ERROR) << "Could not open file for writing:" << file_path;
+    return;
+  }
+
+  // 存入文件当中
+  while (true) {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+
+    cv_disk_.wait(lock, [this] {
+      return stop_worker_ || (last_written_packet_ < last_in_order_packet_);
+    });
+
+    while (last_written_packet_ < last_in_order_packet_) {
+      int next_write_idx = last_written_packet_ + 1;
+      int circular_idx = next_write_idx % ring_buffer_capacity_;
+
+      char *data_ptr = nullptr;
+      int data_len = 0;
+
+      if (ring_received_flags_[circular_idx] == true &&
+          ring_buffer_[circular_idx].seq_number_ != -1) {
+        data_ptr = ring_buffer_[circular_idx].data_;
+        ring_buffer_[circular_idx].data_ = nullptr;
+        ring_buffer_[circular_idx].seq_number_ = -1;
+        ring_received_flags_[circular_idx] = false;
+      } else {
+        break;
+      }
+
+      lock.unlock();
+
+      if (data_ptr != nullptr && file.is_open()) {
+        file << data_ptr;
+        free(data_ptr);
+      }
+
+      lock.lock();
+
+      last_written_packet_ = next_write_idx;
+    }
+
+    if (stop_worker_ && last_written_packet_ == last_in_order_packet_) {
+      break;
+    }
+  }
+  file.close();
+  LOG(INFO) << "File writing thread finished.";
 }
 
 void UdpClient::SendFileRequest(const std::string &file_name) {
@@ -27,17 +86,19 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
     receiver_window_ = 100;
   }
 
-  //环形队列初始化设置
+  // 环形队列初始化设置
   ring_buffer_capacity_ = receiver_window_ + 10;
   ring_buffer_.resize(ring_buffer_capacity_);
 
   for (int i = 0; i < ring_buffer_capacity_; ++i) {
-      ring_buffer_[i].data_ = nullptr;
-      ring_buffer_[i].seq_number_ = -1; 
+    ring_buffer_[i].data_ = nullptr;
+    ring_buffer_[i].seq_number_ = -1;
   }
 
   ring_received_flags_.assign(ring_buffer_capacity_, false);
 
+  stop_worker_ = false;
+  disk_thread_ = std::thread(&UdpClient::file_write_loop, this, file_name);
 
   unsigned char *buffer =
       (unsigned char *)calloc(MAX_PACKET_SIZE, sizeof(unsigned char));
@@ -51,15 +112,17 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
   }
   memset(buffer, 0, MAX_PACKET_SIZE);
 
-  std::fstream file;
-  std::string file_path = std::string(CLIENT_FILE_PATH) + file_name;
-  file.open(file_path.c_str(), std::ios::out);
-
   while ((n = recvfrom(sockfd_, buffer, MAX_PACKET_SIZE, 0, NULL, NULL)) > 0) {
     char buffer2[20];
     memcpy(buffer2, buffer, 20);
     if (strstr(buffer2, "FILE NOT FOUND") != NULL) {
       LOG(ERROR) << "File not found !!!";
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        stop_worker_ = true;
+      }
+      cv_disk_.notify_one();
+      disk_thread_.join();
       free(buffer);
       return;
     }
@@ -74,7 +137,7 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
     if (is_packet_drop_ && rand() % 100 < prob_value_) {
       LOG(INFO) << "Dropping this packet with seq "
                 << data_segment->seq_number_;
-      if(data_segment->data_ != nullptr){
+      if (data_segment->data_ != nullptr) {
         free(data_segment->data_);
         data_segment->data_ = nullptr;
       }
@@ -92,15 +155,17 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
     if (last_in_order_packet_ == -1) {
       next_seq_expected = initial_seq_number_;
     } else {
-      next_seq_expected = ring_buffer_[last_in_order_packet_ % ring_buffer_capacity_].seq_number_ +
-                          ring_buffer_[last_in_order_packet_ % ring_buffer_capacity_].length_;
+      next_seq_expected =
+          ring_buffer_[last_in_order_packet_ % ring_buffer_capacity_]
+              .seq_number_ +
+          ring_buffer_[last_in_order_packet_ % ring_buffer_capacity_].length_;
     }
 
     // Old packet
     if (next_seq_expected > data_segment->seq_number_ &&
         !data_segment->fin_flag_) {
       send_ack(next_seq_expected);
-      if(data_segment->data_ != nullptr){
+      if (data_segment->data_ != nullptr) {
         free(data_segment->data_);
         data_segment->data_ = nullptr;
       }
@@ -111,10 +176,20 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
         (data_segment->seq_number_ - next_seq_expected) / MAX_DATA_SIZE;
     int this_segment_index = last_in_order_packet_ + segments_in_between + 1;
 
+    if (this_segment_index - last_written_packet_ > ring_buffer_capacity_) {
+      LOG(WARNING) << "Buffer full (Disk slow), dropping packet "
+                   << this_segment_index;
+      if (data_segment->data_ != nullptr) {
+        free(data_segment->data_);
+        data_segment->data_ = nullptr;
+      }
+      continue;
+    }
+
     if (this_segment_index - last_in_order_packet_ > receiver_window_) {
       LOG(INFO) << "Packet dropped " << this_segment_index;
       // Drop the packet, if it exceeds receiver window
-      if(data_segment->data_ != nullptr){
+      if (data_segment->data_ != nullptr) {
         free(data_segment->data_);
         data_segment->data_ = nullptr;
       }
@@ -126,57 +201,38 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
       fin_flag_received_ = true;
     }
 
-    insert(this_segment_index, *data_segment);
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      insert(this_segment_index, *data_segment);
 
-    // for (int i = last_in_order_packet_ + 1; i <= last_packet_received_; i++) {
-    //   if (data_segments_[i].seq_number_ != -1) {
-    //     if (file.is_open()) {
-    //       file << data_segments_[i].data_;
-    //       last_in_order_packet_ = i;
-    //     }
-    //   } else {
-    //     break;
-    //   }
-    // }
+      while (true) {
+        int next_check_index = last_in_order_packet_ + 1;
+        int circular_idx = next_check_index % ring_buffer_capacity_;
 
-    //存入文件当中
-    while(true){
-      int next_check_index = last_in_order_packet_ + 1;
-      int circular_idx = next_check_index % ring_buffer_capacity_;
-
-      if(ring_received_flags_[circular_idx] == true){
-        if(ring_buffer_[circular_idx].seq_number_ != -1){
-          if(file.is_open()){
-            file << ring_buffer_[circular_idx].data_;
-          }
-
-          if(ring_buffer_[circular_idx].data_ != nullptr){
-            free(ring_buffer_[circular_idx].data_);
-            ring_buffer_[circular_idx].data_ = nullptr;
-          }
-
-          ring_received_flags_[circular_idx] = false;
-
-          //更新最后一个放好的buffer，滑动窗口
+        if (ring_received_flags_[circular_idx] &&
+            ring_buffer_[circular_idx].seq_number_ != -1) {
           last_in_order_packet_ = next_check_index;
-        }else{
+        } else {
           break;
         }
-      }else{
-        break;
       }
     }
 
-
+    cv_disk_.notify_one();
     // 如果已经接收到 fin_flag_ 且所有数据包都处理完毕，则跳出循环
     if (fin_flag_received_ && last_in_order_packet_ == last_packet_received_) {
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        stop_worker_ = true;
+      }
+      cv_disk_.notify_one();
       break;
     }
 
     int ack_val;
-    if(last_in_order_packet_ == -1){
+    if (last_in_order_packet_ == -1) {
       ack_val = initial_seq_number_;
-    }else{
+    } else {
       int idx = last_in_order_packet_ % ring_buffer_capacity_;
       ack_val = ring_buffer_[idx].seq_number_ + ring_buffer_[idx].length_;
     }
@@ -186,11 +242,14 @@ void UdpClient::SendFileRequest(const std::string &file_name) {
     memset(buffer, 0, MAX_PACKET_SIZE);
   }
 
+  if (disk_thread_.joinable()) {
+    disk_thread_.join();
+  }
   free(buffer);
-  file.close();
 }
 
-// int UdpClient::add_to_data_segment_vector(const DataSegment &data_segment) {
+// int UdpClient::add_to_data_segment_vector(const DataSegment &data_segment)
+// {
 //   data_segments_.push_back(data_segment);
 //   return data_segments_.size() - 1;
 // }
@@ -256,8 +315,8 @@ void UdpClient::insert(int index, DataSegment &data_segment) {
   // }
 
   int circular_index = index % ring_buffer_capacity_;
-  if(ring_received_flags_[circular_index] == true){
-    if(ring_buffer_[circular_index].data_ != nullptr){
+  if (ring_received_flags_[circular_index] == true) {
+    if (ring_buffer_[circular_index].data_ != nullptr) {
       free(ring_buffer_[circular_index].data_);
       ring_buffer_[circular_index].data_ = nullptr;
     }
@@ -267,7 +326,7 @@ void UdpClient::insert(int index, DataSegment &data_segment) {
   data_segment.data_ = nullptr;
   ring_received_flags_[circular_index] = true;
 
-  if(index > last_packet_received_){
+  if (index > last_packet_received_) {
     last_packet_received_ = index;
   }
 }

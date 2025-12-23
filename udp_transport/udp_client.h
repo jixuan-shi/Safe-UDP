@@ -5,9 +5,15 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
+
 #include "data_segment.h"
 
 namespace safe_udp {
@@ -36,7 +42,10 @@ class UdpClient {
  private:
   void send_ack(int ackNumber);
   void insert(int index, DataSegment& data_segment);
-  //int add_to_data_segment_vector(const DataSegment& data_segment);
+  // int add_to_data_segment_vector(const DataSegment& data_segment);
+
+  // 线程调用的写入文件的函数
+  void file_write_loop(const std::string& filename);
 
   int sockfd_;
   int seq_number_;
@@ -45,9 +54,16 @@ class UdpClient {
   struct sockaddr_in server_address_;
   // std::vector<DataSegment> data_segments_;
 
-  //环形队列
+  // 环形队列
   std::vector<DataSegment> ring_buffer_;
   std::vector<bool> ring_received_flags_;
   int ring_buffer_capacity_;
+
+  // 多线程同步变量
+  std::thread disk_thread_;
+  std::mutex queue_mutex_;
+  std::condition_variable cv_disk_;
+  std::atomic<bool> stop_worker_;
+  std::atomic<int> last_written_packet_;
 };
 }  // namespace safe_udp
