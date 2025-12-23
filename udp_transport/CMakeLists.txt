@@ -4,9 +4,11 @@ set(file
   sliding_window.cpp
   udp_server.cpp
   udp_client.cpp
+  json.hpp
   )
 
 add_library(udp_transport SHARED ${file})
+
 target_link_libraries(udp_transport  glog)
 
 install(TARGETS  udp_transport DESTINATION  ${PROJECT_BINARY_DIR}/lib)

@@ -1,0 +1,5 @@
+{
+    "port": 8080,
+    "send_window": 100,
+    "file_path": "/work/files/server_files/"
+}

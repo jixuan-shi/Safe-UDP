@@ -1,0 +1,12 @@
+{
+    "server":{
+        "ip": "127.0.0.1",
+        "port": 8080
+    },
+    "file_to_request": "天龙八部.txt",
+    "receive_window": 100,
+    "simulation":{
+        "simulation_mode": 3,
+        "drop_percentage": 15
+    }
+}
