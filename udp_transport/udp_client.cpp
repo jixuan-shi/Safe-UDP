@@ -51,7 +51,6 @@ void UdpClient::file_write_loop(const std::string &filename) {
           ring_buffer_[circular_idx].seq_number_ != -1) {
         data_ptr = ring_buffer_[circular_idx].data_;
         ring_buffer_[circular_idx].data_ = nullptr;
-        ring_buffer_[circular_idx].seq_number_ = -1;
         ring_received_flags_[circular_idx] = false;
       } else {
         break;

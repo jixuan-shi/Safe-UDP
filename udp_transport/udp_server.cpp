@@ -6,10 +6,12 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
+
 #include <algorithm>
 #include <cmath>
 #include <sstream>
 #include <vector>
+
 #include <glog/logging.h>
 
 namespace safe_udp {
@@ -147,7 +149,7 @@ void UdpServer::send() {
     FD_SET(sockfd_, &rfds);
 
     tv.tv_sec = (int64_t)smoothed_timeout_ / 1000000;
-    tv.tv_usec = smoothed_timeout_ - tv.tv_sec;
+    tv.tv_usec = smoothed_timeout_ - tv.tv_sec * 1000000;
 
     LOG(INFO) << "SELECT START:" << smoothed_timeout_ << "!!!";
     while (true) {
@@ -158,13 +160,13 @@ void UdpServer::send() {
         wait_for_ack();
 
         if (cwnd_ >= ssthresh_) {
-          //慢启动---->拥塞避免
+          // 慢启动---->拥塞避免
           LOG(INFO) << "CHANGE TO CONG AVD";
           is_cong_avd_ = true;
           is_slow_start_ = false;
 
-          cwnd_ = 1;      //我之前把这两行注释了，然后编译运行就出错了，给客户端发送了找不到文件，但是服务端又一直打印重读的内容，现在改回来还是这样，怎么回事
-          ssthresh_ = 64;//我之前把这两行注释了，然后编译运行就出错了，给客户端发送了找不到文件，但是服务端又一直打印重读的内容，现在改回来还是这样，怎么回事
+          // cwnd_ = 1;
+          // ssthresh_ = 64;
         }
 
         if (sliding_window_->last_acked_packet_ ==
@@ -307,7 +309,7 @@ void UdpServer::wait_for_ack() {
   };
   DataSegment ack_segment;
   ack_segment.DeserializeToDataSegment(buffer, n);
-  if(ack_segment.data_ != nullptr){
+  if (ack_segment.data_ != nullptr) {
     free(ack_segment.data_);
     ack_segment.data_ = nullptr;
   }

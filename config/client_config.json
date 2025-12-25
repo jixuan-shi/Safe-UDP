@@ -6,7 +6,7 @@
     "file_to_request": "天龙八部.txt",
     "receive_window": 100,
     "simulation":{
-        "simulation_mode": 3,
+        "simulation_mode": 1,
         "drop_percentage": 15
     }
 }
